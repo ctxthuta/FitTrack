@@ -1,0 +1,72 @@
+name: Build FitTrack APK from ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '*.zip'
+      - '.github/workflows/build-fittrack-from-zip.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract FitTrack source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          archives = sorted(Path('.').glob('*.zip'))
+          if len(archives) != 1:
+              raise SystemExit(f'Expected exactly one ZIP in repository root, found {len(archives)}: {archives}')
+          dest = Path('extracted').resolve()
+          dest.mkdir(exist_ok=True)
+          with zipfile.ZipFile(archives[0]) as z:
+              for info in z.infolist():
+                  target = (dest / info.filename).resolve()
+                  if not target.is_relative_to(dest):
+                      raise SystemExit(f'Unsafe ZIP entry: {info.filename}')
+              z.extractall(dest)
+          roots = [p.parent for p in dest.rglob('settings.gradle.kts') if (p.parent / 'app' / 'build.gradle.kts').is_file()]
+          if len(roots) != 1:
+              raise SystemExit(f'Expected one Android project, found {len(roots)}')
+          with open(__import__('os').environ['GITHUB_ENV'], 'a') as f:
+              f.write(f'PROJECT_DIR={roots[0].relative_to(Path.cwd())}\n')
+          print(f'Android project found: {roots[0]}')
+          PY
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Build debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FitTrack-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
